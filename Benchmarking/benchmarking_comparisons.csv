@@ -1,0 +1,11 @@
+,CDEC_ID,BCM_ID,BCM_MONTHLY_R2,RF_R2,LM_R2,BCM_NSE,RF_NSE,LM_NSE
+1,AMF,American River at Fair Oaks,0.78,0.86,0.79,0.74,0.82,0.53
+2,CSN,Cosumnes River at Michigan Bar,0.8,0.84,0.6,0.7,0.72,0.24
+3,FTO,Feather River near Oroville,0.54,0.76,0.76,0.51,0.76,0.34
+4,MKW,Mokelumne River at Pardee Reservoir,0.79,0.84,0.88,0.69,-2.99,-152.44
+5,MRC,Merced River at Exchequer Reservoir,0.81,0.83,0.67,0.68,0.82,0.62
+6,SBB,Sacramento River Near Red Bluff,0.53,0.89,0.67,0.57,0.86,0.12
+7,SJF,San Joaquin River at Millerton Reservoir,0.88,0.92,0.34,0.77,0.86,0.29
+8,SNS,Stanislaus River at Melones Reservoir,0.79,0.9,0.66,0.71,0.9,0.66
+9,TLG,Tuolumne River at Don Pedro Reservoir,0.8,0.86,0.57,0.74,0.79,0.45
+10,YRS,Yuba River at Smartville,0.73,0.9,0.74,0.68,0.89,0.66

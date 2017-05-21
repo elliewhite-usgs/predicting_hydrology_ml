@@ -1,0 +1,853 @@
+---
+title: "ML with CDEC UFs"
+author: "Ellie White"
+date: "Apr 30th, 2017"
+output: html_document
+---
+
+# Contents  
+1.0 Data & Visualizations  
+2.0 Data Prep for Cross Validation    
+3.0 Interpolation with Trees      
+4.0 Measures of Fit   
+  AE, RE, R2, RMSE(AF), NSE, RSR, PBIAS functions   
+  Global Stats  
+  Per Basin  
+  Testing vs. Training  
+  High Flow vs. Low Flow  
+  Large Basins vs. Small Basins  
+  Comparisons  
+  Spatial Distribution of the Residuals & R2   
+5.0 Benchmarking   
+  USGS Basin Characterization Model  
+  HydroMad  
+  Multi Variate Linear Regression  
+6.0 Other Machine Learning Methods ?TBD  
+7.0 PCA  
+  
+# Libraries 
+library(corrplot)       # for correlation plots  
+library(sp)             # for spatial transformations  
+library(rpart)          # for classification and regression trees  
+library(randomForest)   # for random forests  
+
+# Citations
+R Core Team (2017). R: A language and environment for statistical computing. R Foundation for Statistical Computing, Vienna, Austria. URL https://www.R-project.org/. R version 3.4.0 (2017-04-21) -- "You Stupid Darkness"  
+
+Taiyun Wei and Viliam Simko (2016). corrplot: Visualization of a Correlation Matrix. R package version 0.77. https://CRAN.R-project.org/package=corrplot
+
+Pebesma, E.J., R.S. Bivand, 2005. Classes and methods for spatial data in R. R News 5 (2), https://cran.r-project.org/doc/Rnews/.
+
+Roger S. Bivand, Edzer Pebesma, Virgilio Gomez-Rubio, 2013. Applied spatial data analysis with R, Second edition. Springer, NY. http://www.asdar-book.org/
+  
+Terry Therneau, Beth Atkinson and Brian Ripley (2017). rpart: Recursive Partitioning and Regression Trees. R package version 4.1-11. https://CRAN.R-project.org/package=rpart
+  
+A. Liaw and M. Wiener (2002). Classification and Regression by randomForest. R News 2(3), 18--22.  
+
+```{r, include=FALSE}
+library(knitr)
+library(formatR)
+opts_chunk$set(
+  fig.width  = 7.5,
+  fig.height = 7.5,
+  collapse   = TRUE,
+  tidy       = FALSE
+)
+
+setwd("D:/Machine Learning with CDEC")
+```
+
+# 1.0 Data & Visualizations  
+```{r data_visualizations}
+# bring data in 
+rfdf <- readRDS("Intermediary Data/rf_input_data.rds")
+
+# clean up
+rfdf <- na.omit(rfdf)
+rfdf <- rfdf[rfdf$FLOW>=0,]
+
+dim(rfdf)
+str(rfdf)
+head(rfdf)
+
+# summary stats
+summary(rfdf$FLOW)
+round(apply(rfdf[,6:(ncol(rfdf)-2)],2,summary),2)
+
+# visualizations
+cols <- character(nrow(rfdf))
+cols[] <- "black"
+cols[rfdf$FLOW >= mean(rfdf$FLOW)] <- "darkblue"
+cols[rfdf$FLOW < mean(rfdf$FLOW)] <- "goldenrod"
+
+plot(rfdf$FLOW, main="Observed Response Data", ylab="Unimpaired Flow (AF)", col=cols)
+
+png('Output Data and Visualizations/Rplot01_flow.png', width=4.5, height=4.9, units="in", pointsize=12, res=1200)
+par(mar=c(4.5,4.5,1,1)+0.1)
+plot(sort(rfdf$FLOW), ylab="Unimpaired Flow (AF)")
+dev.off()
+
+png('Output Data and Visualizations/Rplot02_tmpvsppt.png', width=4.5, height=4.9, units="in", pointsize=12, res=1200)
+par(mar=c(4.5,4.5,1,1)+0.1)
+plot(rfdf$PPT, rfdf$TMP, col=cols, xlab="Precipitation (mm)", ylab="Temperature (deg C)")
+legend("topright", inset=0.05, cex=0.8, title="Legend", c("low flow", "high flow"), horiz=FALSE, pch=c(1,1), col=c("goldenrod","darkblue"), bg="grey96")
+dev.off()
+
+# scatterplot matrix
+pairs(rfdf[,c(6:14, ncol(rfdf))], col=cols) # climate 
+pairs(rfdf[,c(15:19, ncol(rfdf))], col=cols) # basins location and geometry
+pairs(rfdf[,c(20:23, ncol(rfdf))], col=cols) # basin elevation
+
+# draw a correlolgram
+library(corrplot)
+
+# pdf('Output Data and Visualizations/Rplot03_1.pdf')
+# cols <- colorRampPalette(c('goldenrod','darkblue'))
+# mar=c(3,3,3,3)
+# corrplot(cor(rfdf[,c(6:14, ncol(rfdf))]), order="hclust", tl.col="black", method="color", addCoef.col="white", col=cols(100), tl.pos="d", diag=FALSE, cl.pos="b", tl.cex=0.6, number.cex=0.6)
+# dev.off()
+
+# pdf('Output Data and Visualizations/Rplot03_2.pdf')
+# corrplot(cor(rfdf[,c(15:19, ncol(rfdf))]), order="hclust", tl.col="black", method="color", addCoef.col="white", col=cols(100), tl.pos="d", diag=FALSE, cl.pos="b", tl.cex=0.6, number.cex=0.8)
+# dev.off()
+
+# pdf('Output Data and Visualizations/Rplot03_3.pdf')
+# corrplot(cor(rfdf[,c(20:23, ncol(rfdf))]), order="hclust", tl.col="black", method="color", addCoef.col="white", col=cols(100), tl.pos="d", diag=FALSE, cl.pos="b", tl.cex=0.6, number.cex=0.8)
+# dev.off()
+
+# pdf('Output Data and Visualizations/Rplot03_4.pdf')
+# corrplot(cor(rfdf[,-c(1:5, 24)]), order="hclust", tl.col="black", method="color", addCoef.col="white", col=cols(100), tl.pos="d", diag=FALSE, cl.pos="b", tl.cex=0.4, number.cex=0.6)
+# dev.off()
+
+png('Output Data and Visualizations/Rplot03_corrwithflow.png', width=7, height=4.9, units="in", pointsize=12, res=1200)
+par(mar=c(4.5,10,1,2)+0.1)
+corrdf <- cor(rfdf[,-c(1:5, 24)])[19,1:18]
+corrdf <- corrdf[order(corrdf,decreasing=FALSE)]
+xx <- barplot(corrdf, col="goldenrod", border="white", horiz=TRUE, las=1, xlim=c(-0.4,0.6), xlab="Correlation Coefficient")
+text(xx, x=corrdf[1:18], label=round(corrdf[1:18],2), pos=4, cex=1, col="darkblue")
+dev.off()
+
+# get spatial data for plotting purposes
+rfdf_c <- rfdf # make a copy 
+
+library(sp)
+coordinates(rfdf_c) <- ~LONGITUDE + LATITUDE
+proj4string(rfdf_c) <- CRS("+proj=longlat +datum=WGS84")
+
+cacounties <- readRDS("Intermediary Data/counties.rds")
+rfdf_c <- spTransform(rfdf_c, proj4string(cacounties))
+basins <- shapefile('Input Data/CDEC_FNF/Catchment_all.shp')
+ca_boundary <-  shapefile('Input Data/DWR_CA_Boundary/California_Boundary.shp')
+
+TA <- CRS("+proj=aea +lat_1=34 +lat_2=40.5 +lat_0=0 +lon_0=-120 +x_0=0 +y_0=-4000000 +datum=NAD83 +units=km +ellps=GRS80")
+
+# spatial plot of outlet of basins
+rfdf_c <- spTransform(rfdf_c, TA)
+cacounties <- spTransform(cacounties, TA)
+basins_ta <- spTransform(basins, TA)
+ca_boundary <- spTransform(ca_boundary, TA)
+
+# pdf('Output Data and Visualizations/Rplot04_1.pdf')
+# plot(basins_ta, col='gray', border='white')
+# plot(rfdf_c, col="darkblue", add=TRUE, pch=20)
+# plot(ca_boundary, border='grey', add=TRUE)
+# dev.off()
+
+png('Output Data and Visualizations/Rplot04_map.png', width=3.5, height=4.9, units="in", pointsize=6, res=1200)
+par(mar=c(0,3,2,1)+0.1)
+plot(cacounties, col='white', border='white')
+plot(cacounties, col='gray88', border='white', add=TRUE)
+plot(basins_ta, col='goldenrod', border='white', add=TRUE)
+plot(rfdf_c, col='darkblue', add=TRUE, pch=20)
+#text(rfdf_c, labels=as.character(rfdf_c@data$CDEC_ID), col="darkblue", cex=0.5, offset=0.25, pos=4)
+dev.off()
+
+# # plot on a basemap
+# library(leaflet)
+# davis <- leaflet() %>% setView(lng=-119.4179, lat=36.7783, zoom = 5)
+# davis %>% addTiles()
+# davis %>% addPolygons(data=spTransform(basins, CRS("+ellps=WGS84 +proj=longlat +datum=WGS84 +no_defs")), fillOpacity = 0.25)
+```
+
+# 2.0 Data Prep for Cross Validation  
+```{r dataprep_cv}
+# set seed to ensure reproducible results
+set.seed(20170430)
+
+# split into train and test datasets, 80/20 split
+rfdf[,"train"] <- ifelse(runif(nrow(rfdf)) < 0.8, 1, 0)
+
+# separate training and test sets
+trainset <- rfdf[rfdf$train==1, ]
+testset <- rfdf[rfdf$train==0, ]
+
+# get column index of train flag
+trainColNum <- grep("train", names(trainset))
+
+# remove train flag column from train and test sets
+trainset <- trainset[, -trainColNum]
+testset <- testset[, -trainColNum]
+```
+
+Q. Does an rf look at interaction terms? yes. so there's not need for example to include precip*drainage area when you have precip and drainage area separately. 
+
+Q. Do the parameters need to be independent for RFs to work right? no, not necessarily, but if you want the random forest to work you may want to not include variables that are dependent on each other, because with the rf the split is made on a subset of variables, and you don't want the rf to keep picking a certain variable when there's another better one around. 
+
+# 3.0 Interpolation with Trees  
+```{r cart}
+library(rpart)
+cart <- rpart(FLOW ~ MONTH + TMP + TMPLAG1 + TMPLAG2 + TMPLAG3 + PPT + PPTLAG1 + PPTLAG2 + PPTLAG3 + SNOW + AREASQM + SHAPE + COMPACTNESS + MEANELEV + BASINRELIEFRATIO + KSAT + SILT + SAND + CLAY + DOMGEOLOGY, data=trainset, method="anova")
+
+# print a table of optimal prunings based on a complexity parameter
+printcp(cart)
+
+# plot a complexity parameter table for the rpart fit, or a visual representation of the cross-validation results
+png('Output Data and Visualizations/Rplot05_cartsize.png', width=5.5, height=4.9, units="in", pointsize=12, res=1200)
+par(mar=c(4.5,4.5,4.5,3)+0.1)
+plotcp(cart)
+dev.off()
+
+# pdf('Output Data and Visualizations/Rplot06_1.pdf')
+# par(mar = c(1, 3, 1, 1))
+# plot(cart, uniform=TRUE, margin=0.1, compress=TRUE)
+# text(cart, use.n=TRUE, all=TRUE, cex=0.5)
+# dev.off()
+
+library(rattle)
+png('Output Data and Visualizations/Rplot06_cart.png', width=6.4, height=6.4, units="in", pointsize=12, res=1200)
+par(mar=c(2,2,2,2)+0.1)
+fancyRpartPlot(cart, sub="", cex=0.75)
+dev.off()
+
+# get some different looking carts for visualization purposes
+cart2 <- rpart(FLOW ~ MONTH + TMP + TMPLAG1 + TMPLAG2 + TMPLAG3 + PPT + PPTLAG1 + PPTLAG2 + PPTLAG3 + SNOW + SHAPE + MEANELEV + BASINRELIEFRATIO + KSAT + SILT + SAND + CLAY + DOMGEOLOGY, data=trainset, method="anova")
+png('Output Data and Visualizations/Rplot06_cart2.png', width=6.4, height=6.4, units="in", pointsize=12, res=1200)
+par(mar=c(2,2,2,2)+0.1)
+fancyRpartPlot(cart2, sub="", cex=0.75)
+dev.off()
+
+cart3 <- rpart(FLOW ~ MONTH + TMP + TMPLAG1 + TMPLAG2 + TMPLAG3 + PPT + SNOW + AREASQM + MEANELEV + BASINRELIEFRATIO, data=trainset, method="anova")
+png('Output Data and Visualizations/Rplot06_cart3.png', width=6.4, height=6.4, units="in", pointsize=12, res=1200)
+par(mar=c(2,2,2,2)+0.1)
+fancyRpartPlot(cart3, sub="", cex=0.75)
+dev.off()
+```
+
+```{r cart_predicting}
+# use this model to predict to test data set
+cartp <- predict(cart, testset[, 5:(ncol(testset)-1)], type="vector")
+
+#calculate RMS error
+cart_rmsqe <- sqrt(mean((cartp-testset$FLOW)^2))
+cart_rmsqe
+
+# plot
+plot(sort(cartp), col="goldenrod", main="CART--Predicted vs. Observed", ylab="Unimpaired Flow (AF)", ylim=c(0,4e+06))
+points(sort(testset$FLOW), col="darkblue")
+legend("topleft", inset=0.05, cex=0.8, title="Legend", c("Observed", "Predicted"), horiz=FALSE, pch=c(1,1), col=c("darkblue","goldenrod"))
+```
+CART gives us a nice result to look at that can be easily interpreted, but the approach suffers from high variance. Therefore, let's look at producing a random forests.  
+
+```{r rf}
+library(randomForest)
+trf <- tuneRF(trainset[, 5:(ncol(trainset)-1)], trainset$FLOW)
+
+png('Output Data and Visualizations/Rplot07_trf.png', width=4.5, height=4.9, units="in", pointsize=12, res=1200)
+par(mar=c(4.5,4.5,1,1)+0.1)
+plot(trf, pch=20)
+lines(trf)
+dev.off()
+
+mt <- trf[which.min(trf[,2]), 1]
+mt
+
+# regression trees
+rrf <- randomForest(trainset[, 5:(ncol(trainset)-1)], trainset$FLOW, mtry=mt)
+rrf
+
+png('Output Data and Visualizations/Rplot08_rrf.png', width=4.5, height=4.9, units="in", pointsize=12, res=1200)
+par(mar=c(4.5,4.5,1,1)+0.1)
+plot(rrf, main="")
+dev.off()
+
+importance(rrf)
+
+png('Output Data and Visualizations/Rplot09_varimp.png', width=4.5, height=4.9, units="in", pointsize=12, res=1200)
+par(mar=c(4.5,4.5,1,1)+0.1)
+varImpPlot(rrf, main="", pch=20)
+dev.off()
+```
+
+```{r rf_predicting}
+# use this model to predict to test data set
+rfp <- predict(rrf, testset[, 5:(ncol(testset)-1)], type="response")
+
+# plot pred vs. obs
+png('Output Data and Visualizations/Rplot10_obsvspred.png', width=4.5, height=4.9, units="in", pointsize=12, res=1200)
+par(mar=c(4.5,4.5,1,1)+0.1)
+plot(sort(rfp), col="goldenrod", ylab="Unimpaired Flow (AF)", ylim=c(0,4e+06))
+points(sort(testset$FLOW), col="darkblue")
+legend("topleft", inset=0.05, cex=0.8, title="Legend", c("Observed", "Predicted"), horiz=FALSE, pch=c(1,1), col=c("darkblue","goldenrod"), bg="grey96")
+dev.off()
+
+# plot pred vs. obs
+png('Output Data and Visualizations/Rplot11_obsvspred.png', width=4.5, height=4.9, units="in", pointsize=12, res=1200)
+par(mar=c(4.5,4.5,1,1)+0.1)
+plot(log(sort(rfp)), col="goldenrod", ylab="ln(Unimpaired Flow (AF))", ylim=c(0,15))
+points(sort(log(testset$FLOW)), col="darkblue")
+legend("bottomright", inset=0.05, cex=0.8, title="Legend", c("Observed", "Predicted"), horiz=FALSE, pch=c(1,1), col=c("darkblue","goldenrod"), bg="grey96")
+dev.off()
+```
+
+# 4.0 Measures of Fit
+
+## 4.1 AE, RE, R2, RMSE(AF), NSE, RSR, PBIAS functions 
+```{r mof_functions}
+# functions 
+ae <- function(obs, pred){
+  l <- pred-obs
+  return(l)
+}
+
+re <- function(obs, pred){
+  l <- 2*(obs-pred)/(obs+pred)
+  return(l)
+}
+
+r2 <- function(obs, pred){
+  l <- summary(lm(obs~pred))$r.squared
+  return(l)
+}
+
+rmse <- function(obs, pred){
+  l <- sqrt(mean((pred-obs)^2))
+  return(l)
+}
+
+nse <- function(obs, pred){
+  l <- 1-sum((pred-obs)^2)/sum((obs-mean(obs))^2)
+  return(l)
+}
+
+rsr <- function(obs, pred){
+  l <- sqrt(sum((pred-obs)^2))/sqrt(sum((obs-mean(obs))^2))
+  return(l)
+}
+
+pbias <- function(obs, pred){
+  l <- sum((pred-obs))*100/sum(obs)
+  return(l)
+}
+
+# work with this df to calculate the measures of fit 
+testset_results <- cbind(testset, rfp)
+```
+
+## 4.2 Global Stats
+```{r mof_calculations}
+rf_ae_global <- ae(testset$FLOW, rfp)
+boxplot(rf_ae_global)
+
+# relative error was not the best for our data
+rf_re_global <- re(testset$FLOW, rfp)
+boxplot(rf_re_global)
+
+rf_r2_global <- r2(testset$FLOW, rfp)
+rf_r2_global
+
+rf_rmse_global <- rmse(testset$FLOW, rfp)
+rf_rmse_global
+
+rf_nse_global <- nse(testset$FLOW, rfp)
+rf_nse_global
+
+rf_rsr_global <- rsr(testset$FLOW, rfp)
+rf_rsr_global
+
+rf_pbias_global <- pbias(testset$FLOW, rfp)
+rf_pbias_global
+```
+
+## 4.3 Per Basin 
+```{r mof_calculations_per_basin}
+rf_r2 <- c()
+rf_rmse <- c()
+rf_nse <- c()
+rf_rsr <- c()
+rf_pbias <- c()
+
+
+for (b in unique(testset_results$CDEC_ID)){
+  sub_test <- testset_results[testset_results$CDEC_ID==b, ]
+  rf_r2 <- c(rf_r2, r2(sub_test$FLOW, sub_test$rfp))
+  rf_rmse <- c(rf_rmse, rmse(sub_test$FLOW, sub_test$rfp))
+  rf_nse <- c(rf_nse, nse(sub_test$FLOW, sub_test$rfp))
+  rf_rsr <- c(rf_rsr, rsr(sub_test$FLOW, sub_test$rfp))
+  rf_pbias <- c(rf_pbias, pbias(sub_test$FLOW, sub_test$rfp))
+}
+
+rf_r2
+boxplot(rf_r2, main="Coefficient of Determination")
+
+rf_rmse
+boxplot(rf_rmse, main="RMSE")
+
+rf_nse
+boxplot(rf_nse, main="NSE")
+
+rf_rsr
+boxplot(rf_rsr, main="RSR")
+
+rf_pbias
+boxplot(rf_pbias, main="Percent Bias")
+
+length <- c()
+for (b in unique(testset_results$CDEC_ID)){
+  sub_test <- testset_results[testset_results$CDEC_ID==b, ]
+  length <- c(length, length(sub_test))
+}
+```
+
+## 4.4 Testing vs. Training 
+```{r mof_testtrain}
+# to show that we are not overfitting, compare the test and training set measures of fit
+rfp_train <- predict(rrf, trainset[, 5:(ncol(testset)-1)], type="response")
+
+rf_ae_global_train <- ae(trainset$FLOW, rfp_train)
+boxplot(rf_ae_global_train)
+
+# relative error was not the best for our data
+rf_re_global_train <- re(trainset$FLOW, rfp_train)
+boxplot(rf_re_global_train)
+
+rf_r2_global_train <- r2(trainset$FLOW, rfp_train)
+rf_r2_global_train
+
+rf_rmse_global_train <- rmse(trainset$FLOW, rfp_train)
+rf_rmse_global_train
+
+rf_nse_global_train <- nse(trainset$FLOW, rfp_train)
+rf_nse_global_train
+
+rf_rsr_global_train <- rsr(trainset$FLOW, rfp_train)
+rf_rsr_global_train
+
+rf_pbias_global_train <- pbias(trainset$FLOW, rfp_train)
+rf_pbias_global_train
+```
+
+## 4.5 High Flow vs. Low Flow 
+```{r mof_highlowflow}
+testset_results_highflow <- testset_results[testset_results$FLOW > mean(testset_results$FLOW),]
+testset_results_lowflow <- testset_results[testset_results$FLOW < mean(testset_results$FLOW),]
+
+rf_ae_hf <- ae(testset_results_highflow$FLOW, testset_results_highflow$rfp)
+boxplot(rf_ae_hf)
+rf_ae_lf <- ae(testset_results_lowflow$FLOW, testset_results_lowflow$rfp)
+boxplot(rf_ae_lf)
+
+rf_re_hf <- re(testset_results_highflow$FLOW, testset_results_highflow$rfp)
+boxplot(rf_re_hf)
+rf_re_lf <- re(testset_results_lowflow$FLOW, testset_results_lowflow$rfp)
+boxplot(rf_re_lf)
+
+rf_r2_hf <- r2(testset_results_highflow$FLOW, testset_results_highflow$rfp)
+rf_r2_hf
+rf_r2_lf <- r2(testset_results_lowflow$FLOW, testset_results_lowflow$rfp)
+rf_r2_lf
+
+rf_rmse_hf <- rmse(testset_results_highflow$FLOW, testset_results_highflow$rfp)
+rf_rmse_hf
+rf_rmse_lf <- rmse(testset_results_lowflow$FLOW, testset_results_lowflow$rfp)
+rf_rmse_lf
+
+rf_nse_hf <- nse(testset_results_highflow$FLOW, testset_results_highflow$rfp)
+rf_nse_hf
+rf_nse_lf <- nse(testset_results_lowflow$FLOW, testset_results_lowflow$rfp)
+rf_nse_lf
+
+rf_rsr_hf <- rsr(testset_results_highflow$FLOW, testset_results_highflow$rfp)
+rf_rsr_hf
+rf_rsr_lf <- rsr(testset_results_lowflow$FLOW, testset_results_lowflow$rfp)
+rf_rsr_lf
+
+rf_pbias_hf <- pbias(testset_results_highflow$FLOW, testset_results_highflow$rfp)
+rf_pbias_hf
+rf_pbias_lf <- pbias(testset_results_lowflow$FLOW, testset_results_lowflow$rfp)
+rf_pbias_lf
+```
+
+## 4.6 Large Basins vs. Small Basins
+```{r mof_largesmallbasin}
+testset_results_largebasin <- testset_results[testset_results$AREASQM > mean(testset_results$AREASQM),]
+testset_results_smallbasin <- testset_results[testset_results$AREASQM < mean(testset_results$AREASQM),]
+
+rf_ae_lb <- ae(testset_results_largebasin$FLOW, testset_results_largebasin$rfp)
+boxplot(rf_ae_lb)
+rf_ae_sb <- ae(testset_results_smallbasin$FLOW, testset_results_smallbasin$rfp)
+boxplot(rf_ae_sb)
+
+rf_re_lb <- re(testset_results_largebasin$FLOW, testset_results_largebasin$rfp)
+boxplot(rf_re_lb)
+rf_re_sb <- re(testset_results_smallbasin$FLOW, testset_results_smallbasin$rfp)
+boxplot(rf_re_sb)
+
+rf_r2_lb <- r2(testset_results_largebasin$FLOW, testset_results_largebasin$rfp)
+rf_r2_lb
+rf_r2_sb <- r2(testset_results_smallbasin$FLOW, testset_results_smallbasin$rfp)
+rf_r2_sb
+
+rf_rmse_lb <- rmse(testset_results_largebasin$FLOW, testset_results_largebasin$rfp)
+rf_rmse_lb
+rf_rmse_sb <- rmse(testset_results_smallbasin$FLOW, testset_results_smallbasin$rfp)
+rf_rmse_sb
+
+rf_nse_lb <- nse(testset_results_largebasin$FLOW, testset_results_largebasin$rfp)
+rf_nse_lb
+rf_nse_sb <- nse(testset_results_smallbasin$FLOW, testset_results_smallbasin$rfp)
+rf_nse_sb
+
+rf_rsr_lb <- rsr(testset_results_largebasin$FLOW, testset_results_largebasin$rfp)
+rf_rsr_lb
+rf_rsr_sb <- rsr(testset_results_smallbasin$FLOW, testset_results_smallbasin$rfp)
+rf_rsr_sb
+
+rf_pbias_lb <- pbias(testset_results_largebasin$FLOW, testset_results_largebasin$rfp)
+rf_pbias_lb
+rf_pbias_sb <- pbias(testset_results_smallbasin$FLOW, testset_results_smallbasin$rfp)
+rf_pbias_sb
+```
+
+## 4.7 Comparisons
+```{r mof_all}
+# compare
+mof_funcs <- c("AE", "RE", "R2", "RMSE(AF)", "NSE", "RSR", "PBIAS")
+
+mof_train <- c(mean(rf_ae_global_train), mean(rf_re_global_train), rf_r2_global_train, rf_rmse_global_train, rf_nse_global_train, rf_rsr_global_train, rf_pbias_global_train)
+
+mof_test <- c(mean(rf_ae_global), mean(rf_re_global), rf_r2_global, rf_rmse_global, rf_nse_global, rf_rsr_global, rf_pbias_global)
+
+mof_highflow <- c(mean(rf_ae_hf), mean(rf_re_hf), rf_r2_hf, rf_rmse_hf, rf_nse_hf, rf_rsr_hf, rf_pbias_hf)
+
+mof_lowflow <- c(mean(rf_ae_lf), mean(rf_re_lf), rf_r2_lf, rf_rmse_lf, rf_nse_lf, rf_rsr_lf, rf_pbias_lf)
+
+mof_largebasins <- c(mean(rf_ae_lb), mean(rf_re_lb), rf_r2_lb, rf_rmse_lb, rf_nse_lb, rf_rsr_lb, rf_pbias_lb)
+mof_smallbasins <- c(mean(rf_ae_sb), mean(rf_re_sb), rf_r2_sb, rf_rmse_sb, rf_nse_sb, rf_rsr_sb, rf_pbias_sb)
+
+# put it all in a dataframe
+mof_comparisons <- cbind(mof_train, mof_test, mof_highflow, mof_lowflow, mof_largebasins, mof_smallbasins)
+rownames(mof_comparisons) <- mof_funcs
+colnames(mof_comparisons) <- c('train_set', 'test_set', 'high_flows', 'low_flows', 'large_basins', 'small_basins')
+
+# number of points in each set
+num_obs_in_category <- c(length(rf_ae_global_train), length(rf_ae_global), length(rf_ae_hf), length(rf_ae_lf), length(rf_ae_lb), length(rf_ae_sb))
+mof_comparisons2 <- rbind(num_obs_in_category, mof_comparisons)
+rownames(mof_comparisons2)[1] <- "NO. obs"
+
+# round the numbers and write it out to excel
+mof_comparisons_rounded <- round(mof_comparisons, 3)
+mof_comparisons_rounded
+write.csv(mof_comparisons_rounded, 'Output Data and Visualizations/model_fit.csv')
+# print(kable(mof_comparisons, digits=2, col.names=c('train', 'test', 'high flows', 'low flows', 'large basins', 'small basins')))
+
+png('Output Data and Visualizations/Rplot17_mofcomp.png', width=6.9, height=4.9, units="in", pointsize=12, res=1200)
+colors <- c("darkblue", "darkblue", "goldenrod", "goldenrod", "lightblue","lightblue")
+values <- matrix(mof_comparisons[c(3,5), ], nrow=2, ncol=6)
+colnames(values) <- colnames(mof_comparisons)
+rownames(values) <- rownames(mof_comparisons)[c(3,5)]
+par(mar=c(4.5,4.5,1,1)+0.1)
+xx <- barplot(values[1,1:6], xlab="Model Fit Diagnostics", ylab="R2", col=colors, beside=TRUE, cex.names=0.8, ylim=c(0,1.1), border="white")
+text(xx, y=values[1,1:6], label=round(values[1,1:6],2), pos=3, cex=1, col="darkblue")
+dev.off()
+```
+
+## 4.8 Spatial Distribution of the Residuals & R2
+```{r spatial_plots}
+library(sp)
+
+# data frame for spatial plotting
+testset3 <- aggregate(rf_ae_global ~ CDEC_ID, data=testset_results, FUN=mean)
+colnames(testset3)[2] <- "rf_ae_mean"
+testset3$rf_ae_sd <- aggregate(rf_ae_global~CDEC_ID, data=testset_results, FUN=sd)[,2]
+testset3$LATITUDE <- aggregate(LATITUDE~CDEC_ID, data=testset_results, FUN=mean)[,2]
+testset3$LONGITUDE <- aggregate(LONGITUDE~CDEC_ID, data=testset_results, FUN=mean)[,2]
+testset3$R2 <- rf_r2
+
+# make spatial points data frame
+coordinates(testset3) <- ~LONGITUDE + LATITUDE
+proj4string(testset3) <- CRS("+proj=longlat +datum=WGS84")
+
+# for plotting the background
+cacounties <- readRDS("Intermediary Data/counties.rds")
+
+# change both spatial dataframes projection
+TA <- CRS("+proj=aea +lat_1=34 +lat_2=40.5 +lat_0=0 +lon_0=-120 +x_0=0 +y_0=-4000000 +datum=NAD83 +units=km +ellps=GRS80")
+cacounties <- spTransform(cacounties, TA)
+testset3 <- spTransform(testset3, TA)
+
+# sp plots of absolute error mean and standard deviation
+counties <- list("sp.polygons", cacounties, fill="gray88", col="white")
+
+# pdf('Output Data and Visualizations/Rplot12.pdf')
+# summary(testset3$rf_ae_mean)
+# breaksmean <- seq(-5e4,3e4,2e4)
+# spplot(testset3, "rf_ae_mean", cuts=breaksmean, main="MU(AE)", sp.layout=counties, colorkey="right")
+# dev.off()
+
+# pdf('Output Data and Visualizations/Rplot13.pdf')
+# summary(testset3$rf_ae_sd)
+# breakssd <- seq(0,4e5,1e5)
+# spplot(testset3, "rf_ae_sd", cuts=breakssd, main="SD(AE)", sp.layout=counties, colorkey="right")
+# dev.off()
+
+# bubble plots of what we plotted above
+
+png('Output Data and Visualizations/Rplot14_rfaemean.png', width=4.5, height=4.9, units="in", pointsize=12, res=1200)
+par(mar=c(0,4.5,1,1)+0.1)
+breaksmean <- seq(-5e4,3e4,2e4)
+bubble(testset3, 'rf_ae_mean', main="MU(AE)", maxsize=4, key.entries=breaksmean, key.space = "right", sp.layout=counties, alpha=0.75, col=c("goldenrod", "darkblue"))
+dev.off()
+
+png('Output Data and Visualizations/Rplot15_rfaestdev.png', width=4.5, height=4.9, units="in", pointsize=12, res=1200)
+par(mar=c(0,4.5,1,1)+0.1)
+breakssd <- seq(0,4e5,1e5)
+bubble(testset3, 'rf_ae_sd', main="SD(AE)", maxsize=4, key.entries=breakssd, key.space = "right", sp.layout=counties, alpha=0.75, col=c("goldenrod", "darkblue"))
+dev.off()
+
+# pdf('Output Data and Visualizations/Rplot15_2.pdf')
+# testset3$coef_var <- testset3$rf_ae_sd/testset3$rf_ae_mean
+# breakscv <- c(-4500, seq(-100,200,50))
+# bubble(testset3, 'coef_var', main="CV(AE)", maxsize=4, key.entries=breakscv, key.space = "right", sp.layout=counties, alpha=0.75, col=c("goldenrod", "darkblue"))
+# dev.off()
+
+# bubble plot of r2 error
+png('Output Data and Visualizations/Rplot16_r2map.png', width=4.5, height=4.9, units="in", pointsize=12, res=1200)
+par(mar=c(0,4.5,1,1)+0.1)
+breaksr2 <- seq(0,1,0.2)
+bubble(testset3, "R2", maxsize=2.5, key.entries=breaksr2, sp.layout=counties, alpha=0.25, col=c("goldenrod", "darkblue"))
+dev.off()
+
+testset3@data$one_minus_r2 <- 1-testset3@data$R2
+bubble(testset3, "one_minus_r2", maxsize=4, key.entries=breaksr2, sp.layout=counties, alpha=0.25, col=c("goldenrod", "darkblue"))
+```
+
+# 5.0 Benchmarking
+
+## 5.1 USGS Basin Characterization Model  
+```{r bcm}
+# I have mapped the validation basins in the BCM to the CDEC basins with arcmap
+bcm_bench_results <- read.csv('Benchmarking/BCM_Validation_Results.csv')
+
+rf_bench_results <- cbind(as.character(unique(testset_results$CDEC_ID)), round(rf_r2,2), round(rf_nse,2))
+colnames(rf_bench_results) <- c('CDEC_ID', 'RF_R2', 'RF_NSE')
+
+bench_results <- merge(bcm_bench_results, rf_bench_results, by='CDEC_ID')
+bench_results <- bench_results[ ,c(1, 2, 10, 13, 12, 14)]
+```
+
+## 5.2 HydroMad 
+```{r hydromad}
+# library(hydromad)
+# Cotter <- data(Cotter)
+# xyplot(Cotter)
+# xyplot(window(Cotter, start = "1974-01-01", end = "1975-01-01"))
+# monthlyPQE <- aggregate(Cotter, as.yearmon, mean)
+# xyplot(monthlyPQE, screens = c("Streamflow (mm/day)", "Areal rain (mm/day)", "Temperature (deg. C)"), xlab = NULL) 
+# ok <- complete.cases(Cotter[, 1:2])
+# with(Cotter, sum(Q[ok])/sum(P[ok]))
+# ts70s <- window(Cotter, start = "1970-01-01",
+# end = "1979-12-31")
+# ts80s <- window(Cotter, start = "1980-01-01",
+# end = "1989-12-31")
+# ts90s <- window(Cotter, start = "1990-01-01",
+# end = "1999-12-31")
+# 
+# x <- rollccf(Cotter)
+# xyplot(x, xlim = extendrange(as.Date(c("1980-01-01",
+# "1990-01-01"))))
+# 
+# cotterMod <- hydromad(ts90s, sma = "cwi", routing = "expuh",
+# tau_s = c(5, 100), tau_q = c(0, 5), v_s = c(0,
+# 1))
+# print(cotterMod)
+# 
+# cotterMod <- update(cotterMod, routing = "armax",
+# rfit = list("sriv", order = c(n = 2, m = 1)))
+# cotterFit <- fitByOptim(cotterMod, samples = 100,
+# method = "PORT")
+# 
+# sim70s <- update(cotterFit, newdata = ts70s)
+# sim80s <- update(cotterFit, newdata = ts80s)
+# simAll <- update(cotterFit, newdata = Cotter)
+# tsVerif <- Cotter
+# tsVerif$Q[time(ts90s)] <- NA
+# simVerif <- update(cotterFit, newdata = tsVerif)
+# allMods <- runlist(calibration = cotterFit, sim70s,
+# sim80s, simVerif)
+# 
+# xyplot(cotterFit, with.P = TRUE, xlim = as.Date(c("1994-01-01",
+# "1997-01-01")))
+# 
+# summary(allMods)
+# print(cotterFit)
+# summary(cotterFit)
+# 
+# xyplot(allMods[2:3], scales = list(y = list(log = TRUE)))
+# 
+# summary(simAll, breaks = "5 years")
+# 
+# twoYrStats <- summary(simAll, breaks = "2 years")
+# statSeries <- twoYrStats[, c("r.squared", "r.sq.sqrt",
+# "rel.bias", "runoff")]
+# statSeries[, 1:2] <- pmax(statSeries[, 1:2], 0)
+# c(xyplot(statSeries, type = "s", lwd = 2, ylab = "statistic",
+# xlab = NULL), `observed streamflow` = xyplot(observed(simAll)),
+# layout = c(1, 5), x.same = TRUE) + layer_(panel.refline(h = 0,
+# v = time(statSeries)))
+# 
+# qqmath(cotterFit, scales = list(y = list(log = TRUE)),
+# type = c("l", "g"))
+# 
+# # To plot a flow duration curve for each of the simulated models:
+# qqmath(allMods, type = c("l", "g"), scales = list(y = list(log = TRUE)),
+# xlab = "Standard normal variate", ylab = "Flow (mm/day)",
+# f.value = ppoints(100), tails.n = 50, as.table = TRUE)
+# 
+# hydromad(ts90s, sma = "cwi", l = c(0, 200), e = 0.166)
+# 
+# ihSpec <- hydromad(ts90s, sma = "cwi", tw = 10, f = 1, routing = "armax")
+# osumm <- tryModelOrders(update(ihSpec, rfit = "sriv"), n = 0:3, m = 0:3, delay = 0)
+# summary(osumm)
+#  
+# 
+# # read in data
+# 
+# pqdat <- read.table("pq_cotter.csv", sep = ",", col.names = c("P", "Q", "Date"), as.is = TRUE)
+# tdat <- read.table("t_cotter.csv", sep = ",", col.names = c("T", "Date"), as.is = TRUE)
+# str(pqdat)
+# str(tdat)
+# pqdat$Date <- as.Date(pqdat$Date, "%d/%m/%Y")
+# tdat$Date <- as.Date(tdat$Date, "%d/%m/%Y")
+# pqdat$Date <- with(pqdat, as.Date(ISOdate(yr, mon, day)))
+# pqdat$P[pqdat$P < 0] <- NA
+# pqdat$Q[pqdat$Q < 0] <- NA
+# tdat <- subset(tdat, !is.na(Date))
+# pqdat$Q <- convertFlow(pqdat$Q, from = "ML", area.km2 = 148)
+# 
+# library(zoo)
+# tsPQ <- zoo(pqdat[, 1:2], pqdat$Date, frequency = 1)
+# tsT <- zoo(tdat[, 1], tdat$Date, frequency = 1)
+# Cotter <- merge(tsPQ, E = tsT, all = FALSE)
+# head(Cotter, 6)
+# range(time(Cotter))
+# Cotter <- na.trim(Cotter)
+# summary(Cotter)
+```
+
+## 5.3 Multi Variate Linear Regression
+```{r mvr}
+# the parameters beta for each predictor variable is determined by minimizing the Residual Sum of Squares (RSS). to fit the regression model use the function lm ():
+lm_hyd <- lm(FLOW ~ MONTH + TMP + TMPLAG1 + TMPLAG2 + TMPLAG3 + PPT + PPTLAG1 + PPTLAG2 + PPTLAG3 + SNOW + AREASQM + SHAPE + COMPACTNESS + MEANELEV + BASINRELIEFRATIO + KSAT + SILT + SAND + CLAY + DOMGEOLOGY, data=testset)
+
+# use the function summary() to get some results :
+summary(lm_hyd, corr=TRUE)
+
+# Create a table with fitted values and residuals
+lm_results <- data.frame(testset, LM_FITTED=fitted(lm_hyd), LM_RESIDUAL=resid(lm_hyd))
+
+# the Analysis of Variance (ANOVA) breaks the total variability observed in the sample into two parts: Total Sample Variablity (TSS) = Variability Explained by the model (SSreg) + Unexplained (or error) Variablity (RSS)
+anova(lm_hyd)
+
+# since with zero predictor variables we should get zero flow lets try a models with no intercept term
+lm0_hyd <- lm(FLOW~-1+AREASQM+TMP+TMPLAG1+TMPLAG2+PPT+PPTLAG1+PPTLAG2, data=testset)
+summary(lm0_hyd)
+
+# obtaining the confidence bands: Reflect the uncertainty about the regression line (how well the line is determined).
+head(predict(lm_hyd, interval="confidence"))
+
+# obtaining the prediction bands: Include also the uncertainty about future observations
+head(predict(lm_hyd, interval="prediction"))
+
+# diagnostics plots
+par(mfrow=c(1,4))
+plot(lm_hyd, which=1:4)
+
+# calculate measures of fit
+lm_r2 <- c()
+lm_rmse <- c()
+lm_nse <- c()
+lm_rsr <- c()
+lm_pbias <- c()
+
+for (b in unique(lm_results$CDEC_ID)){
+  sub_test <- lm_results[lm_results$CDEC_ID==b, ]
+  lm_r2 <- c(lm_r2, r2(sub_test$FLOW, sub_test$LM_FITTED))
+  lm_rmse <- c(lm_rmse, rmse(sub_test$FLOW, sub_test$LM_FITTED))
+  lm_nse <- c(lm_nse, nse(sub_test$FLOW, sub_test$LM_FITTED))
+  lm_rsr <- c(lm_rsr, rsr(sub_test$FLOW, sub_test$LM_FITTED))
+  lm_pbias <- c(lm_pbias, pbias(sub_test$FLOW, sub_test$LM_FITTED))
+}
+```
+
+## 5.4 Comparisons & Putting it All Together
+```{r benchmarking_results}
+# add to comparison dataframe 
+lm_bench_results <- cbind(as.character(unique(lm_results$CDEC_ID)), round(lm_r2,2), round(lm_nse,2))
+colnames(lm_bench_results) <- c('CDEC_ID', 'LM_R2', 'LM_NSE')
+
+bench_results <- merge(bench_results, lm_bench_results, by='CDEC_ID')
+bench_results <- bench_results[,c("CDEC_ID", "BCM_ID", "BCM_MONTHLY_R2", "RF_R2", "LM_R2", "BCM_NSE", "RF_NSE", "LM_NSE")]
+write.csv(bench_results, 'Benchmarking/benchmarking_comparisons.csv')
+
+bench_results
+
+png('Output Data and Visualizations/Rplot18_benchmarking.png', width=11, height=4.9, units="in", pointsize=12, res=1200)
+par(mar=c(4.4,4.5,4.5,4.5)+0.1)
+colors <- c("darkblue","goldenrod","lightblue")
+models <- c("Process Based Model","Random Forest","Linear Multivariate Regression")
+regions <- bench_results$CDEC_ID
+values <- matrix(t(bench_results[-c(1, 2)]), nrow=6, ncol=10)
+values <- matrix(as.numeric(values), ncol=10, nrow=6)
+colnames(values) <- bench_results[,1]
+rownames(values) <- colnames(bench_results)[3:8]
+
+xx <- barplot(values[1:3, ], xlab="CDEC ID", ylab="R2", col=colors, beside=TRUE, legend.text=models, ylim=c(0,1.15), border="white", args.legend=list(x = "topright", inset=c(0.05, -0.15)))
+text(xx, y=values[1:3, ], label=round(values[1:3, ],2), pos=3, cex=0.9, col="darkblue")
+dev.off()
+```
+
+# 6.0 Other Machine Learning Methods ?TBD
+```{r oml_methods}
+# maybe do this with scikitlearn
+
+```
+
+# 7.0 PCA 
+```{r pca}
+pca <- prcomp(trainset[, 6:(ncol(trainset)-2)], scale = TRUE)
+pca
+
+# plot to see the first three PCs explain most of the variability in the data
+plot(pca, type="l")
+
+# or this plot
+screeplot(pca, type="l")
+
+summary(pca)
+
+# predict PCs to testset data
+pcap <- predict(pca, newdata=testset[, 6:(ncol(trainset)-2)])
+
+biplot(pca)
+
+# first apply a Box-Cox transformation to correct for skewness, center and scale each variable and then apply PCA in one call to the preProcess function of the caret package
+library(caret)
+trans <- preProcess(trainset[, 6:(ncol(trainset)-2)], method=c("BoxCox", "center", "scale", "pca"))
+pcap2 <- predict(trans, testset[, 6:(ncol(trainset)-2)])
+
+# By default, the function keeps only the PCs that are necessary to explain at least 95% of the variability in the data, but this can be changed through the argument thresh.
+head(pcap2)
+```
+
+
+

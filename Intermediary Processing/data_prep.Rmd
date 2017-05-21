@@ -1,0 +1,578 @@
+---
+title: "Data Prep For ML"
+author: "Ellie White"
+date: "May 11th, 2017"
+output: pdf_document
+---
+
+# Contents   
+1.0 Data Gathering  
+    Basin Boundaries -- Developed from NHDPlusV2
+    Climate (Dynamic) -- PRISM  
+    Basin Geometry
+    Hypsometry -- SRTM
+    Soil Properties -- POLARIS  
+    Geology -- NRCS 
+    Unimpaired Flows -- CDEC  
+    Month
+2.0 Data Prep for Random Forest     
+ 
+# Libraries  
+library(raster)         # for raster data manipulation  
+library(rgeos)          # for spatial data calculations  
+library(rgdal)          # for spatial data manipulation  
+library(prism)          # for temp and precip data  
+library(sharpshootR)    # for CDEC web scraping    
+library(reshape2)       # for reshaping data  
+  
+# Citations
+R Core Team (2017). R: A language and environment for statistical computing. R Foundation for Statistical Computing, Vienna, Austria. URL https://www.R-project.org/. R version 3.4.0 (2017-04-21) -- "You Stupid Darkness"
+
+Robert J. Hijmans (2016). raster: Geographic Data Analysis and Modeling. R package version 2.5-8. https://CRAN.R-project.org/package=raster
+
+Roger Bivand and Colin Rundel (2017). rgeos: Interface to Geometry Engine - Open Source (GEOS). R package version 0.3-23. https://CRAN.R-project.org/package=rgeos
+
+Roger Bivand, Tim Keitt and Barry Rowlingson (2017). rgdal: Bindings for the Geospatial Data Abstraction Library. R package version 1.2-7. https://CRAN.R-project.org/package=rgdal
+  
+Edmund M. Hart and Kendon Bell (2015) prism: Download data from the Oregon prism project. R package version 0.0.6 http://github.com/ropensci/prism DOI: 10.5281/zenodo.33663
+
+USDA-NRCS Soil Survey Staff (2016). sharpshootR: A Soil Survey Toolkit. R package version 1.0. https://CRAN.R-project.org/package=sharpshootR 
+  
+Hadley Wickham (2007). Reshaping Data with the reshape Package. Journal of Statistical Software, 21(12), 1-20. URL http://www.jstatsoft.org/v21/i12/.  
+
+Nathaniel W. Chaney, Eric F. Wood, Alexander B. McBratney, Jonathan W. Hempel, Travis W. Nauman, Colby W. Brungard, Nathan P. Odgers, POLARIS: A 30-meter probabilistic soil series map of the contiguous United States, Geoderma, Volume 274, 15 July 2016, Pages 54-67, ISSN 0016-7061, https://doi.org/10.1016/j.geoderma.2016.03.025.   
+
+```{r, include=FALSE}
+library(knitr)
+library(formatR)
+opts_chunk$set(
+  fig.width  = 7.5,
+  fig.height = 7.5,
+  collapse   = TRUE,
+  tidy       = FALSE
+)
+
+setwd("D:/Machine Learning with CDEC")
+```
+
+# 1.0 Data Gathering  
+
+## 1.1 Basin Boundaries -- Developed from NHDPlusV2
+```{r basin_data}
+library(raster)
+# CDEC Basin locations 
+sptdf <- df <- read.csv("Input Data/CDEC_FNF/CDEC_FNF_Locations.csv", header=TRUE, stringsAsFactors=FALSE, fileEncoding="latin1")
+
+# keep df as a normal DataFrame for later use, and make spdf a SpatialPolygonsDataFrame
+coordinates(sptdf) <- ~LONGITUDE + LATITUDE
+proj4string(sptdf) <- CRS('+proj=longlat +datum=WGS84')
+
+library(rgdal)
+basins <- shapefile('Input Data/CDEC_FNF/Catchment_all.shp')
+
+# projections used for California
+TA <- crs("+proj=aea +lat_1=34 +lat_2=40.5 +lat_0=0 +lon_0=-120 +x_0=0 +y_0=-4000000 +datum=NAD83 +units=km +ellps=GRS80")
+Albers <- crs("+proj=aea +lat_1=29.5 +lat_2=45.5 +lat_0=23 +lon_0=-96 +x_0=0 +y_0=0 +datum=NAD83 +units=m +no_defs +ellps=GRS80 +towgs84=0,0,0")
+
+# transform to all to Albers
+sptdf <- spTransform(sptdf, Albers)
+basins <- spTransform(basins, Albers)
+```
+    
+## 1.2 Climate (Dynamic) -- PRISM
+What:  
+* tmean	Mean temperature, mean(monthly min, monthly max)  
+* tmax	Maximum temperature in degrees celcius  
+* tmin	Minimum temperature in degrees celcius  
+* ppt	Total precipitation (Rain and snow) in millimeters  
+* vpdmin	Daily minimum vapor pressure deficit [averaged over all days in the month - normal data only]  
+* vpdmax	Daily maximum vapor pressure deficit [averaged over all days in the month - normal data only]  
+
+Type (extension): .bil (binary data), gridded rasters for the continental US at 4km resolution  
+Time Resolution: 3 different scales available: daily, monthly and 30 year normals. Data is available from 1891 until 2014, however you have to download all data for years prior to 1981. 
+Modifications: need to aggregate by basin  
+```{r prism_data}
+# library(prism)
+# # set the path to download temperature data
+# options(prism.path = "Input Data/PRISM_TMP")
+# 
+# # uncomment to download data if not in the directory set above
+# # get_prism_monthlys(type = "tmean", year = 1981:2014, mon = 1:12, keepZip = FALSE)
+# 
+# # create a stack of prism files
+# prism_tmp <- prism_stack(ls_prism_data()[, 1])
+# 
+# # set the path to download precipitation data
+# options(prism.path = "Input Data/PRISM_PPT")
+# 
+# # uncomment to download data if not in the directory set above
+# # get_prism_monthlys(type = "ppt", year = 1981:2014, mon = 1:12, keepZip = FALSE)
+# 
+# # create a stack of prism files
+# prism_ppt <- prism_stack(ls_prism_data()[,1])
+```
+
+```{r prism_aggregation}
+# # aggregate temp and precip rasters by basin boundaries
+# basins_tmp <- extract(prism_tmp, basins, fun=mean,  weights=FALSE, small=TRUE)
+# basins_ppt <- extract(prism_ppt, basins, fun=mean,  weights=FALSE, small=TRUE)
+# 
+# # plot to check
+# plot(basins_tmp[, 1])
+# plot(basins_ppt[, 1])
+# 
+# # write to a csv file
+# write.csv(basins_tmp, file="Input Data/CDEC_FNF/basins_PRISM_TMP.csv", row.names = FALSE)
+# write.csv(basins_ppt, file="Input Data/CDEC_FNF/basins_PRISM_PPT.csv", row.names = FALSE)
+
+# read in
+basins@data$TMP <- read.csv("Input Data/CDEC_FNF/basins_PRISM_TMP.csv")
+basins@data$PPT <- read.csv("Input Data/CDEC_FNF/basins_PRISM_PPT.csv")
+
+# fix the column names as actual dates
+strspl <- unlist(strsplit(colnames(basins@data$TMP), split="_"))
+date_vector <- strspl[seq(5,length(strspl),6)]
+date_formatted <-paste(substr(date_vector,1,4),"-",substr(date_vector,5,6),"-01",sep="")
+
+# since the precip and temp data are for the same time series change the column names on both dataframes
+colnames(basins@data$TMP) <- colnames(basins@data$PPT) <- date_formatted
+
+# lag-1: lag temp and precip by one month (meaning the previous time steps data will be associated with the current month)
+# lag-2: lag temp and precip by two months or lag lag-1 by one month
+tmplag1 <- tmplag2 <- tmplag3 <- basins@data$TMP
+colnames(tmplag1) <- date_vector_lag1 <- c(date_formatted[2:length(date_formatted)], NA)
+colnames(tmplag2) <- date_vector_lag2 <- c(date_vector_lag1[2:length(date_formatted)], NA)
+colnames(tmplag3) <- c(date_vector_lag2[2:length(date_formatted)], NA)
+
+# delete the last month, and last two months, and the last three months, because of the lagging we won't have ppt and tmp comlete information
+basins@data$TMPLAG1 <- tmplag1[1:(length(tmplag1)-1)]
+basins@data$TMPLAG2 <- tmplag2[1:(length(tmplag1)-2)]
+basins@data$TMPLAG3 <- tmplag3[1:(length(tmplag1)-3)]
+
+pptlag1 <- pptlag2 <- pptlag3 <- basins@data$PPT
+colnames(pptlag1) <- date_vector_lag1 <- c(date_formatted[2:length(date_formatted)], NA)
+colnames(pptlag2) <- date_vector_lag2 <- c(date_vector_lag1[2:length(date_formatted)], NA)
+colnames(pptlag3) <- c(date_vector_lag2[2:length(date_formatted)], NA)
+
+basins@data$PPTLAG1 <- pptlag1[1:(length(pptlag1)-1)]
+basins@data$PPTLAG2 <- pptlag2[1:(length(pptlag1)-2)]
+basins@data$PPTLAG3 <- pptlag3[1:(length(pptlag1)-3)]
+```
+
+```{r prism_formatting}
+# let's start with some formatting of the data frames
+# for temp
+tmp_df <- cbind(basins@data$STATION, basins@data$TMP)
+colnames(tmp_df)[1] <- "CDEC_ID"
+tmp_df_long <- reshape2:::melt.data.frame(tmp_df, id.var ="CDEC_ID", measure.var = 2:(ncol(tmp_df)), variable.name = "datetime", value.name = "tmp" )
+
+# for templag1
+tmplag1_df <- cbind(basins@data$STATION,basins@data$TMPLAG1)
+colnames(tmplag1_df)[1] <-"CDEC_ID"
+tmplag1_df_long <- reshape2:::melt.data.frame(tmplag1_df, id.var ="CDEC_ID", measure.var = 2:(ncol(tmplag1_df)), variable.name = "datetime", value.name = "tmplag1" )
+
+# for templag2
+tmplag2_df <- cbind(basins@data$STATION,basins@data$TMPLAG2)
+colnames(tmplag2_df)[1] <-"CDEC_ID"
+tmplag2_df_long <- reshape2:::melt.data.frame(tmplag2_df, id.var ="CDEC_ID", measure.var = 2:(ncol(tmplag2_df)), variable.name = "datetime", value.name = "tmplag2" )
+
+# for templag3
+tmplag3_df <- cbind(basins@data$STATION,basins@data$TMPLAG3)
+colnames(tmplag3_df)[1] <-"CDEC_ID"
+tmplag3_df_long <- reshape2:::melt.data.frame(tmplag3_df, id.var ="CDEC_ID", measure.var = 2:(ncol(tmplag3_df)), variable.name = "datetime", value.name = "tmplag3" )
+
+# for ppt
+ppt_df <- cbind(basins@data$STATION,basins@data$PPT)
+colnames(ppt_df)[1] <- "CDEC_ID"
+ppt_df_long <- reshape2:::melt.data.frame(ppt_df, id.var ="CDEC_ID", measure.var = 2:(ncol(ppt_df)), variable.name = "datetime", value.name = "ppt" )
+
+# for pptlag1
+pptlag1_df <- cbind(basins@data$STATION,basins@data$PPTLAG1)
+colnames(pptlag1_df)[1] <-"CDEC_ID"
+pptlag1_df_long <- reshape2:::melt.data.frame(pptlag1_df, id.var ="CDEC_ID", measure.var = 2:(ncol(pptlag1_df)), variable.name = "datetime", value.name = "pptlag1" )
+
+# for pptlag2
+pptlag2_df <- cbind(basins@data$STATION,basins@data$PPTLAG2)
+colnames(pptlag2_df)[1] <-"CDEC_ID"
+pptlag2_df_long <- reshape2:::melt.data.frame(pptlag2_df, id.var ="CDEC_ID", measure.var = 2:(ncol(pptlag2_df)), variable.name = "datetime", value.name = "pptlag2" )
+
+# for pptlag3
+pptlag3_df <- cbind(basins@data$STATION,basins@data$PPTLAG3)
+colnames(pptlag3_df)[1] <-"CDEC_ID"
+pptlag3_df_long <- reshape2:::melt.data.frame(pptlag3_df, id.var ="CDEC_ID", measure.var = 2:(ncol(pptlag3_df)), variable.name = "datetime", value.name = "pptlag3" )
+```
+
+```{r ppt_snow}
+# will these lags be sufficient to represent ice and snow? No, according to Godsey(2013) in "Effects of changes in winter snowpacks on summer low flows: case studies in the Sierra Nevada, California, USA". They found that "at some locations, low flows exhibit a ‘memory effect’ in which they depend not only on the current year's snowpack but also on the previous year's snowpack." so do we need to have a cumulative rain that falls as snow (temp under 2degC) or maybe we need to bring in snow data.
+
+snow_df <- cbind(tmp_df_long, ppt_df_long$ppt)
+colnames(snow_df) <- c("CDEC_ID", "DATE", "TMP", "PPT")
+
+snow_df$YEAR <- substring(snow_df$DATE, 1, 4)
+snow_df$MONTH <- month.abb[as.integer(substring(snow_df$DATE, 6, 7))]
+snow_df$SNOW <- ifelse(snow_df$TMP<=2,snow_df$PPT,0) # the threshold is arbitrary, it is used in calculating snow day ratio so I will use it for now. Can change it later and see if we do better
+x <- list() # cumulative PPT under a certain TMP, for each basin. It accumulates from Oct of the previous year. 
+j <-1
+for (i in unique(snow_df$CDEC_ID)){
+  subset <- snow_df[snow_df$CDEC_ID==i,]
+  # in case it's not ordered, order subset by date
+  subset <- subset[order(as.Date(subset$DATE, format="%Y-%m-%d")),]
+  loc_oct <- which(subset$MONTH=="Oct")
+  # since the ppt record starts at Jan make NAs for the beginning of the record, otherwise it will be suspiciously low compared to when we have the full water year ppt record
+  num_na_beg <- loc_oct[1]-1 
+  # end in Sep so it's the end of the water year
+  num_na_end <- length(subset$PPT)-loc_oct[length(loc_oct)]+1
+  #print(sprintf("Number added to beginning is %d, to end is %d",num_na_beg,num_na_end))
+  loc_oct <- loc_oct[1:(length(loc_oct)-1)]
+  cumul_vect <- rep(NA,num_na_beg)
+  for (m in loc_oct){
+    cumul <- subset$SNOW[m]
+    cumul_vect <- c(cumul_vect,cumul)
+    for (n in (m+1):(m+11)){
+      cumul <- cumul+subset$SNOW[n]
+      cumul_vect <- c(cumul_vect, cumul)
+    }
+  }
+  cumul_vect <- c(cumul_vect,rep(NA,num_na_end))
+  x[[j]] <- cumul_vect
+  j <- j+1
+}
+names(x) <- as.character(unique(snow_df$CDEC_ID))
+# check the lengths of the lists
+# for (n in names(x)){
+#   print(length(x[[n]]))
+# }
+
+# since the lengths of the lists are all the same, make this list a dataframe
+y <- as.data.frame(x)
+rownames(y) <- date_formatted
+y[,"datetime"] <- date_formatted
+snow_df_long <- reshape2:::melt.data.frame(y, id.var="datetime", measure.var = 1:(ncol(y)-1), variable.name = "CDEC_ID", value.name = "SNOW")
+```
+
+## 1.3 Basin Geometry
+```{r geometry}
+# drainage area
+library(rgeos)
+basins@data$AREASQKM <- area(basins)/1000000 
+
+######################################################################################
+# shape
+# can be described as circular, rectangular, triangular, or pear. The latter is most common. Shape directly impacts the size of peak discharge and its arrival time at the basin outlet. Peak discharge for a circular basin will arrive sooner than that of an elongate basin of the same area because the tributary network in a circular basin is more compactly organized and tributary flows enter the mainstem at roughly the same time, thus more runoff is delivered to the outlet together, sooner (shorter duration, higher flood peak). L = Length of watershed/ W = Width of watershed
+
+library(dismo)
+basins_spldf <- as(basins, "SpatialLinesDataFrame")
+
+# need to make points for each basin seperately
+basins_name <- unique(basins_spldf@data$STATION)
+basins_length <- c()
+basins_width <- c()
+basins_shape <- c()
+
+for (i in 1:length(basins_name)){
+  h <- basins_name[i]
+  sub_basins <- basins_spldf[basins_spldf@data$STATION==h, ] 
+  # sample points on the basin boundary to create points
+  sub_sptdf <- spsample(sub_basins, 10000, type="regular") 
+  # use rectHull to find the length and width of the basin
+  rect_hull <- rectHull(sub_sptdf)
+  rect_coords <- geom(polygons(rect_hull))
+  l1 <- pointDistance(rect_coords[1,5:6], rect_coords[2,5:6], lonlat=FALSE)
+  l2 <- pointDistance(rect_coords[2,5:6], rect_coords[3,5:6], lonlat=FALSE)
+  if(l1 > l2){
+    length <- l1
+    width <- l2
+  } else{
+    length <- l2
+    width <- l1
+  } 
+  basins_length <- c(basins_length, length) 
+  basins_width <- c(basins_width, width)
+  basins_shape <- basins_length/basins_width
+}
+
+basins@data$LENGTH <- basins_length
+basins@data$WIDTH <-  basins_width
+basins@data$SHAPE <- basins_shape
+
+######################################################################################
+# basin compactness = area over perimeter^2*100
+library(geosphere)
+basins_perimeter <- perimeter(spTransform(basins, CRSobj=CRS("+proj=longlat +datum=NAD83")))
+
+basins_compactness <- basins@data$AREASQKM*1000000/(basins_perimeter^2)
+basins@data$COMPACTNESS <- basins_compactness
+
+######################################################################################
+# drainage density
+# bring in NHD river network, crop to boundaries, compute lenght of line segments
+
+```
+
+## 1.4 Hypsometry -- SRTM
+```{r hypsometric}
+# What: alt = elevation data from the SRTM 90m model
+# type (extension): .grd 
+# time resolution: static  
+# spacial resolution: 90m (at the equator or 3 arc seconds). The vertical error of the DEMs is reported to be less than 16m. 
+# note: this data set is split for USA
+# units: meters
+# modifications: need to aggregate by basin
+
+## uncomment to download
+# elev <- getData('alt', country='USA', mask=TRUE) !!! this is not working anymore
+
+elev <- raster("Input Data/SRTM_Altitude/USA1_msk_alt.grd")
+basins_transformed <- spTransform(basins, crs(elev))
+
+# uncomment to run again if needed
+# basins_mean_elev <- extract(elev, basins_transformed, fun=mean, weights=FALSE, small=TRUE, na.rm=TRUE)
+# write.csv(basins_mean_elev, file="Input Data/CDEC_FNF/basins_MEAN_ELEV.csv", row.names = FALSE)
+test <- read.csv("Input Data/CDEC_FNF/basins_MEAN_ELEV.csv")
+basins@data$MEANELEV <- test$V1
+
+# gauge elevation: note, this turned out to be close to, but not exactly min elevation. we will use this in liu of min elevation when needed because in theory the lowest elevation should be at the gauge, but the gauge latlons are not quite exact. bad quality data, but what can you do...
+sptdf_transformed <- spTransform(sptdf, crs(elev))
+sptdf@data$GAUGEELEV <- extract(elev, sptdf_transformed)
+
+# relief ratio (Pike and Wilson 1971): the Elevation-Relief Ratio provides hypsometric information about a watershed. = Zavg - Zmin / Zmax - Zmin
+
+# basins_max_elev <- extract(elev, basins_transformed, fun=max, weights=FALSE, small=TRUE, na.rm=TRUE)
+# write.csv(basins_max_elev, file="Input Data/CDEC_FNF/basins_MAX_ELEV.csv", row.names = FALSE)
+test <- read.csv("Input Data/CDEC_FNF/basins_MAX_ELEV.csv")
+basins@data$MAXELEV <- test$V1
+
+# basin relief ratio: the ratio between total relief (max elev-min elev) and basin length (long axis length)
+basins@data$BASINRELIEFRATIO <- (basins@data$MAXELEV-sptdf@data$GAUGEELEV)/basins@data$LENGTH
+  
+# basin slope
+# center of raster cell that has min or max elevation
+# maxmindist <- gDistance()
+# basins@data$SLOPE <- (basins@data$MAXELEV-basins@data$MINELEV)/maxmindist
+```
+
+Refs to check:
+Bedient (1992)
+Gray (1970)
+Grohmann & Riccomini (2009) Computers & Geosciences 35
+Montgomery & Brandon (2002) Earth and Planetary Science Letters 201
+Morisawa (1958)
+Sarangi et al. (2003)
+Sougnez & Vanacker (2011) Hydrology and Earth Systems Sciences 15
+Wisler (1959)
+Safran et al. (2005) ESPL 30, Fig. 7
+
+## 1.5 Soil Properties -- POLARIS
+```{r polaris}
+# What: SSURGO processed soil data, 3 arcsec (~100 m)
+# projection: Lambert Conformal Conic 
+# Datum: NAD83
+# url: http://stream.princeton.edu/POLARIS/PROPERTIES/3arcsec/
+# date retrieved: 05/11/17
+# type (extension): .tif 
+# time resolution: static  
+# spacial resolution: 100 m 
+# units: meters
+# modifications: need to aggregate by basin
+# credit: Nate Chaney
+
+# library(ncdf)
+# test <- raster('Input Data/POLARIS/lat4546_lon-93-92.nc')	 
+ksat <- raster('Input Data/POLARIS/ksat_mean_0_5.tif')
+silt <- raster('Input Data/POLARIS/silt_mean_0_5.tif')
+sand <- raster('Input Data/POLARIS/sand_mean_0_5.tif')
+clay <- raster('Input Data/POLARIS/clay_mean_0_5.tif')
+slope <- raster('Input Data/POLARIS/slope_mean.tif')
+
+basins_transformed <- spTransform(basins, crs(ksat))
+
+# # uncomment to download 
+# basins_ksat <- extract(ksat, basins_transformed, fun=mean, weights=FALSE, small=TRUE, na.rm=TRUE)
+# write.csv(basins_ksat, file="Input Data/CDEC_FNF/basins_KSAT.csv", row.names=FALSE)
+test <- read.csv("Input Data/CDEC_FNF/basins_KSAT.csv")
+basins@data$KSAT <- test$V1
+
+# basins_silt <- extract(silt, basins_transformed, fun=mean, weights=FALSE, small=TRUE, na.rm=TRUE)
+# write.csv(basins_silt, file="Input Data/CDEC_FNF/basins_SILT.csv", row.names=FALSE)
+test <- read.csv("Input Data/CDEC_FNF/basins_SILT.csv")
+basins@data$SILT <- test$V1
+
+# basins_sand <- extract(sand, basins_transformed, fun=mean, weights=FALSE, small=TRUE, na.rm=TRUE)
+# write.csv(basins_sand, file="Input Data/CDEC_FNF/basins_SAND.csv", row.names=FALSE)
+test <- read.csv("Input Data/CDEC_FNF/basins_SAND.csv")
+basins@data$SAND <- test$V1
+
+# basins_clay <- extract(clay, basins_transformed, fun=mean, weights=FALSE, small=TRUE, na.rm=TRUE)
+# write.csv(basins_clay, file="Input Data/CDEC_FNF/basins_CLAY.csv", row.names=FALSE)
+test <- read.csv("Input Data/CDEC_FNF/basins_CLAY.csv")
+basins@data$CLAY <- test$V1
+
+# check that sand, silt and clay add up to 100, or close enough
+basins@data$CLAY+basins@data$SILT+basins@data$SAND
+
+# some more variables that I could consider but we don't want to add to the complexity of the model
+# mean permeability
+# mean water capacity
+# mean bulk density
+# mean organic matter
+# mean depth of water table
+# mean soil thickness
+# mean percent clay, silt, sand
+# mean percent fine and coarse soils
+# mean soil erodibility factor (from Universal Soil Loss Equation)
+# mean runoff factor (from Universal Soil Loss Equation)
+```
+
+## 1.6 Geology -- NRCS
+```{r geo_data}
+# # Geology (Reed and Bush 2005)
+# # percent of basin each of nine geological classes
+# # dominant geologic class in basin
+# 
+# nrcsgeo_ca <- shapefile('Input Data/NRCS_GEOLOGY/geology_a_ca.shp')
+# nrcsgeo_nv <- shapefile('Input Data/NRCS_GEOLOGY/geology_a_nv.shp')
+# nrcsgeo_or <- shapefile('Input Data/NRCS_GEOLOGY/geology_a_or.shp')
+# nrcsgeo_wa <- shapefile('Input Data/NRCS_GEOLOGY/geology_a_wa.shp')
+# 
+# nrcsgeo_ca <- spTransform(nrcsgeo_ca, Albers)
+# nrcsgeo_nv <- spTransform(nrcsgeo_nv, Albers)
+# nrcsgeo_or <- spTransform(nrcsgeo_or, Albers)
+# nrcsgeo_wa <- spTransform(nrcsgeo_wa, Albers)
+# 
+# # find the percentage of each rock type overlayed by each basin
+# library(rgeos)
+# basins_names <- basins@data$STATION
+# rock_names <- unique(nrcsgeo_ca@data$ROCKTYPE1)
+# 
+# #Initialize an empty data frame
+# df_basins <- data.frame(matrix(0,nrow=length(basins_names),ncol=length(rock_names)))
+# colnames(df_basins) <- rock_names
+# rownames(df_basins) <- basins_names
+# for (r in 1:(length(basins_names))){
+#   h <- basins_names[r]
+#   sub_basin <- basins[basins@data$STATION==h,]
+#   sub_int <- intersect(nrcsgeo_ca, sub_basin)
+#   sub_int@data$PROPORTIONS <- (area(sub_int)/1000000)/sub_int@data$AREASQKM
+#   sub_int2 <- sub_int@data[sub_int@data$STATION==h,c("PROPORTIONS","ROCKTYPE1")]
+#   sub_int2 <- aggregate(PROPORTIONS~ROCKTYPE1, data=sub_int2, FUN="sum")
+#   if (nrow(sub_int2)>0){
+#     for (k in 1:length(sub_int2$ROCKTYPE1)){
+#       #cat("sub index number:",k,"\n")
+#       c <- sub_int2$ROCKTYPE1[k]
+#       col_num <- which(rock_names==c) 
+#       cat("df index:",r,",",col_num,"\n")
+#       if (df_basins[r,col_num]!=0){
+#         print("Note: this index already has a value")
+#       }
+#       df_basins[r,col_num] <- sub_int2[k,"PROPORTIONS"]
+#     }
+#   }
+# }
+# 
+# df_basins$DOMGEOLOGY <- colnames(df_basins)[apply(df_basins,1,which.max)]
+# write.csv(df_basins$DOMGEOLOGY, 'Input Data/CDEC_FNF/basins_DOMGEO.csv')
+
+domgeology <- read.csv('Input Data/CDEC_FNF/basins_DOMGEO.csv')
+basins@data$DOMGEOLOGY <- domgeology$x
+```
+
+## 1.7 Unimpaired Flows -- CDEC 
+What: CDEC monthly FNF (full natural flow) in AF, upon further investigation these values are actually unimpared flows
+Type (extension): dataframe in r  
+Time resolution: monthly  
+Spacial resolution: for all CDEC gauges in CA (consisting of some DWR, USBR, PGE, ... gages) 
+Modifications: none
+```{r unimpaired_flow}
+# # read stations, coordinates are NAD-27, WGS-84 datum
+# cdec_fnf_sta <- read.csv("Data/CDEC/CDEC_FNF_Locations.csv", header=TRUE, stringsAsFactors=FALSE, fileEncoding="latin1")
+# id_list_cdec <- cdec_fnf_sta$CDEC_ID
+# 
+# library(sharpshootR)
+# # sensor for "FLOW, FULL NATURAL"= 65, units in AF
+# 
+# mflowlist_cdec <- list()
+# for (id in id_list_cdec){
+#   mflowlist_cdec[[id]] <- CDECquery(id, sensor=65, interval="M", start="1982-01-01", end="2014-12-31")
+# }
+# 
+# # if you get an error in the command above uncomment this for loop and run this
+# # for (id in id_list_cdec){
+# #   mflowtry_cdec <- try(CDECquery(id, sensor=65, interval="M", start="1982-01-01", end="2014-12-31"), silent=FALSE)
+# #     if ('try-error' %in% class(mflowtry_cdec)) next
+# #     else mflowlist_cdec[[id]] <- mflowtry_cdec
+# # }
+# 
+# # coerce list into a data frame
+# mflowdf_cdec <- do.call(rbind.data.frame, mflowlist_cdec)
+# 
+# # the name is written in with a "___.#", get rid of the number
+# mflowdf_cdec$CDEC_ID <- substring(rownames(mflowdf_cdec), 1, 3)
+# 
+# # write to a csv file
+# write.csv(mflowdf_cdec, file="Data/CDEC/CDEC_FNF.csv", row.names=FALSE)
+
+cdec_fnf <- read.csv("Input Data/CDEC_FNF/CDEC_FNF.csv")
+cdec_fnf <- na.omit(cdec_fnf)
+cdec_fnf <- cdec_fnf[,-c(2:3)]
+```
+
+## 1.8 Month
+```{r month}
+cdec_fnf$MONTH <- month.abb[as.integer(substring(cdec_fnf$datetime, 6, 7))]
+```
+
+## 2.0 Data Prep for Random Forest 
+```{r bind_data, eval=FALSE, include=FALSE}
+# join to the predictor data to response data by "datetime"!
+colnames(basins@data)
+
+# predictor data: "TMP", "PPT", "TMPLAG1", "TMPLAG2", "TMPLAG3", "PPTLAG1", "PPTLAG2", "PPTLAG3", "SNOW", "AREASQKM", "SHAPE", "COMPACTNESS", "MEANELEV", "BASINRELIEFRATIO", "KSAT", "SILT", "SAND", "CLAY", "DOMGEOLOGY"
+# response data: "FLOW"
+ 
+library(reshape2)
+df$AREASQM <- basins@data$AREASQKM
+df$SHAPE <- basins@data$SHAPE
+df$COMPACTNESS <- basins@data$COMPACTNESS
+df$MEANELEV <- basins@data$MEANELEV
+df$BASINRELIEFRATIO <- basins@data$BASINRELIEFRATIO
+df$KSAT <- basins@data$KSAT
+df$SILT <- basins@data$SILT
+df$SAND <- basins@data$SAND
+df$CLAY <- basins@data$CLAY
+df$DOMGEOLOGY <- basins@data$DOMGEOLOGY
+
+cdec_fnf_merge <- merge(cdec_fnf, df, by="CDEC_ID")
+
+rfdf <- merge(cdec_fnf_merge, tmp_df_long, by=c("datetime","CDEC_ID"))
+rfdf <- merge(rfdf, tmplag1_df_long, by=c("datetime","CDEC_ID"))
+rfdf <- merge(rfdf, tmplag2_df_long, by=c("datetime","CDEC_ID"))
+rfdf <- merge(rfdf, tmplag3_df_long, by=c("datetime","CDEC_ID"))
+rfdf <- merge(rfdf, ppt_df_long, by=c("datetime","CDEC_ID"))
+rfdf <- merge(rfdf, pptlag1_df_long, by=c("datetime","CDEC_ID"))
+rfdf <- merge(rfdf, pptlag2_df_long, by=c("datetime","CDEC_ID"))
+rfdf <- merge(rfdf, pptlag3_df_long, by=c("datetime","CDEC_ID"))
+rfdf <- merge(rfdf, snow_df_long, by=c("datetime", "CDEC_ID"))
+
+# order the columns somewhat logically
+rfdf <- rfdf[, c("datetime", "CDEC_ID", "LONGITUDE", "LATITUDE", "MONTH", "tmp", "tmplag1", "tmplag2", "tmplag3", "ppt", "pptlag1", "pptlag2", "pptlag3", "SNOW", "AREASQM", "SHAPE", "COMPACTNESS", "MEANELEV", "BASINRELIEFRATIO", "KSAT", "SILT", "SAND", "CLAY", "DOMGEOLOGY", "value")]
+colnames(rfdf) <- c("DATE", "CDEC_ID", "LONGITUDE", "LATITUDE", "MONTH", "TMP", "TMPLAG1", "TMPLAG2", "TMPLAG3", "PPT", "PPTLAG1", "PPTLAG2", "PPTLAG3", "SNOW", "AREASQM", "SHAPE", "COMPACTNESS", "MEANELEV", "BASINRELIEFRATIO", "KSAT", "SILT", "SAND", "CLAY", "DOMGEOLOGY", "FLOW")
+rfdf <- na.omit(rfdf)
+```
+
+```{r final_touches}
+# clean up column types 
+str(rfdf)
+rfdf$MONTH <- as.factor(rfdf$MONTH)
+str(rfdf)
+
+# output the dataframe to a .rds. use this for larger data 
+saveRDS(rfdf, file="Intermediary Data/rf_input_data.rds" )
+
+# now just read it back in
+rfdf <- readRDS("Intermediary Data/rf_input_data.rds")
+```
+
+
+
+
+
